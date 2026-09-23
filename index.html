@@ -451,8 +451,10 @@
 (function(){
   "use strict";
 
-  // Browser-cookie-only persistence. The encoded data is split across cookies
-  // because individual browser cookies are limited to roughly 4 KB.
+  // Offline-first persistence: localStorage works on file:// URLs and without
+  // internet, unlike cookies (blocked on file:// in Chrome). Cookies remain
+  // only as a fallback (e.g. private mode) and as a one-time import source.
+  var STORAGE_KEY = "equilibrium_data_v1";
   var COOKIE_PREFIX = "equilibrium_data_v1_";
   var COOKIE_CHUNK_SIZE = 3000;
   var COOKIE_MAX_AGE = 60 * 60 * 24 * 365 * 5; // 5 years
@@ -514,7 +516,7 @@
       chipExp_one:"<strong>{n}</strong> expense", chipExp_other:"<strong>{n}</strong> expenses",
       settledChip:"<strong>{n}</strong> settled",
       phEvent:"e.g. Bali Trip", phName:"e.g. Priya", phWhat:"e.g. Travel, Food, Hotel",
-      cookieError:"Equilibrium could not save this data in browser cookies. Your browser may have reached its cookie storage limit."
+      cookieError:"Equilibrium could not save your data in this browser. Storage may be full or blocked."
     } },
     bn: { name:"\u09ac\u09be\u0982\u09b2\u09be", strings:{
       language:"ভাষা",
@@ -564,7 +566,7 @@
       chipExp_one:"<strong>{n}</strong>টি খরচ", chipExp_other:"<strong>{n}</strong>টি খরচ",
       settledChip:"<strong>{n}</strong> পরিশোধিত",
       phEvent:"যেমন: বালি ভ্রমণ", phName:"যেমন: প্রিয়া", phWhat:"যেমন: ভ্রমণ, খাবার, হোটেল",
-      cookieError:"ব্রাউজার কুকিতে Equilibrium-এর ডেটা সংরক্ষণ করা যায়নি। কুকির জায়গা শেষ হয়ে থাকতে পারে।"
+      cookieError:"এই ব্রাউজারে Equilibrium আপনার ডেটা সংরক্ষণ করতে পারেনি। জায়গা শেষ বা ব্লক হয়ে থাকতে পারে।"
     } }
   };
   function t(key, vars){
@@ -631,6 +633,13 @@
 
   function loadState(){
     try{
+      var raw = null;
+      try{ raw = window.localStorage.getItem(STORAGE_KEY); }catch(e){}
+      if(raw){
+        var parsed = JSON.parse(raw);
+        if(parsed && Array.isArray(parsed.events)) return migrate(parsed);
+      }
+      // One-time import from legacy cookie storage, then keep using localStorage.
       var encoded = "";
       for(var i=0;;i++){
         var chunk = getCookie(COOKIE_PREFIX + i);
@@ -638,35 +647,47 @@
         encoded += chunk;
       }
       if(encoded){
-        var parsed = JSON.parse(decodeURIComponent(encoded));
-        if(parsed && Array.isArray(parsed.events)) return migrate(parsed);
+        var legacy = JSON.parse(decodeURIComponent(encoded));
+        if(legacy && Array.isArray(legacy.events)){
+          var st = migrate(legacy);
+          try{ window.localStorage.setItem(STORAGE_KEY, JSON.stringify(st)); }catch(e){}
+          return st;
+        }
       }
-    }catch(e){ console.error("Equilibrium: failed to load saved cookie data", e); }
+    }catch(e){ console.error("Equilibrium: failed to load saved data", e); }
     return { events: [] };
+  }
+
+  function saveCookies(){
+    // Encode once, then chunk the encoded value so Unicode names (including
+    // Bangla) cannot unexpectedly exceed the browser cookie size limit.
+    var encoded = encodeURIComponent(JSON.stringify(state));
+    var chunks = [];
+    for(var i=0;i<encoded.length;i+=COOKIE_CHUNK_SIZE){
+      chunks.push(encoded.slice(i, i + COOKIE_CHUNK_SIZE));
+    }
+
+    // Remove old chunks before writing the current set.
+    for(var oldIndex=0;;oldIndex++){
+      var oldName = COOKIE_PREFIX + oldIndex;
+      var existing = getCookie(oldName);
+      if(existing === null) break;
+      deleteCookie(oldName);
+    }
+
+    if(chunks.length === 0) chunks.push(encodeURIComponent(JSON.stringify(state)));
+    chunks.forEach(function(chunk, index){ setCookie(COOKIE_PREFIX + index, chunk); });
   }
 
   function save(){
     try{
-      // Encode once, then chunk the encoded value so Unicode names (including
-      // Bangla) cannot unexpectedly exceed the browser cookie size limit.
-      var encoded = encodeURIComponent(JSON.stringify(state));
-      var chunks = [];
-      for(var i=0;i<encoded.length;i+=COOKIE_CHUNK_SIZE){
-        chunks.push(encoded.slice(i, i + COOKIE_CHUNK_SIZE));
-      }
-
-      // Remove old chunks before writing the current set.
-      for(var oldIndex=0;;oldIndex++){
-        var oldName = COOKIE_PREFIX + oldIndex;
-        var existing = getCookie(oldName);
-        if(existing === null) break;
-        deleteCookie(oldName);
-      }
-
-      if(chunks.length === 0) chunks.push(encodeURIComponent(JSON.stringify(state)));
-      chunks.forEach(function(chunk, index){ setCookie(COOKIE_PREFIX + index, chunk); });
+      try{
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        return;
+      }catch(e){ /* fall through to cookies (e.g. private mode) */ }
+      saveCookies();
     }catch(e){
-      console.error("Equilibrium: failed to save cookie data", e);
+      console.error("Equilibrium: failed to save data", e);
       alert(t("cookieError"));
     }
   }
